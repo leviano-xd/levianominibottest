@@ -9,6 +9,7 @@ const {
     jidDecode,
     downloadContentFromMessage,
     getContentType,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const { levianomd } = require('./lib/system');
 const config = require('./config');
@@ -120,7 +121,6 @@ for (const file of pluginFiles) {
     catch (e) { levianoLog(`Failed to load plugin ${file}: ${e.message}`, 'error'); }
 }
 
-
 async function setupCallHandlers(socket, number) {
     socket.ev.on('call', async (calls) => {
         try {
@@ -185,7 +185,6 @@ function setupAutoRestart(socket, number) {
     });
 }
 
-
 async function levianoPair(number, res = null) {
     let connectionLockKey;
     const sanitizedNumber = number.replace(/[^0-9]/g, '');
@@ -226,6 +225,10 @@ async function levianoPair(number, res = null) {
         const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
         const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug' });
 
+        // Auto fetch the latest WhatsApp Web version to prevent 405 Connection Failure
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        levianoLog(`Using WA version: ${version.join('.')} (isLatest: ${isLatest})`, 'info');
+
         const levianoStore = createarslanStore();
 
         const conn = makeWASocket({
@@ -235,16 +238,16 @@ async function levianoPair(number, res = null) {
             },
             printQRInTerminal: false,
             logger: pino({ level: "silent" }),
-            version: [2, 3000, 1033105955],
+            version,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 0,
             keepAliveIntervalMs: 10000,
             emitOwnEvents: true,
             fireInitQueries: true,
             generateHighQualityLinkPreview: true,
-            syncFullHistory: true,
+            syncFullHistory: false,
             markOnlineOnConnect: true,
-            browser: ['Mac OS', 'Safari', '10.15.7'],
+            browser: Browsers.macOS('Desktop'),
             getMessage: async (key) => {
                 const msg = await levianoStore.loadMessage(key.remoteJid, key.id);
                 return msg && msg.message ? msg.message : { conversation: 'LEVIANO-XD' };
@@ -283,7 +286,7 @@ async function levianoPair(number, res = null) {
         if (!conn.authState.creds.registered) {
             levianoLog(`🔐 Starting NEW pairing process for ${sanitizedNumber}`, 'info');
             try {
-                await delay(1500);
+                await delay(2000);
                 const code = await conn.requestPairingCode(sanitizedNumber);
                 levianoLog(`Pairing Code for ${sanitizedNumber}: ${code}`, 'success');
                 if (res && !res.headersSent) {
@@ -338,7 +341,6 @@ async function levianoPair(number, res = null) {
                 if (reason === DisconnectReason.loggedOut) levianoLog(`Session logged out.`, 'error');
             }
         });
-
 
         conn.ev.on('messages.upsert', async (msg) => {
             try {
@@ -470,7 +472,6 @@ async function levianoPair(number, res = null) {
     }
 }
 
-
 router.get('/', (req, res) => res.sendFile(path.join(__dirname, 'pair.html')));
 router.get('/code', async (req, res) => { if (!req.query.number) return res.json({ error: 'Number required' }); await levianoPair(req.query.number, res); });
 router.get('/status', async (req, res) => {
@@ -548,8 +549,6 @@ router.get('/stats', async (req, res) => {
     } catch (e) { res.status(500).json({ error: 'Failed' }); }
 });
 
-
-
 async function autoReconnectFromMongoDB() {
     try {
         levianoLog('Attempting auto-reconnect from MongoDB...', 'info');
@@ -567,8 +566,6 @@ async function autoReconnectFromMongoDB() {
 }
 
 setTimeout(() => { autoReconnectFromMongoDB(); }, 3000);
-
-
 
 process.on('exit', () => {
     activeSockets.forEach((socket, number) => {
