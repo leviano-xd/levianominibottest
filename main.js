@@ -53,7 +53,6 @@ const socketCreationTime = new Map();
 // Custom Header Banner
 const HEADER = `▸▸▸▸▸ ʟᴇᴠɪᴀɴᴏ X xᴅ ◂◂◂◂◂\n  ╰─► ᴘᴏᴡᴇʀᴇᴅ ʙʏ ʟᴇᴠɪᴀɴᴏ ꜱᴇʀ\n\n`;
 
-// Placeholder or importer fallback for levianoxd / levianomd if undefined
 const levianoxd = typeof global.levianoxd === 'function' ? global.levianoxd : async (conn) => {};
 const leviano = typeof global.leviano === 'function' ? global.leviano : (msg, type) => levianoLog(msg, type);
 
@@ -79,7 +78,6 @@ function createarslanStore() {
     return store;
 }
 
-// Utility functions
 const createSerial = (size) => crypto.randomBytes(size).toString('hex').slice(0, size);
 
 const getGroupAdmins = (participants) => {
@@ -151,8 +149,8 @@ function setupAutoRestart(socket, number) {
             const errorMessage = lastDisconnect && lastDisconnect.error && lastDisconnect.error.message;
             levianoLog(`Connection closed for ${number}: ${statusCode} - ${errorMessage}`, 'warning');
 
-            if (statusCode === 401 || (errorMessage && errorMessage.includes('401'))) {
-                levianoLog(`Manual unlink detected for ${number}, cleaning up...`, 'warning');
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                levianoLog(`Session logged out / unlinked for ${number}, clearing records...`, 'warning');
                 const sanitizedNumber = number.replace(/[^0-9]/g, '');
                 activeSockets.delete(sanitizedNumber);
                 socketCreationTime.delete(sanitizedNumber);
@@ -207,7 +205,7 @@ async function levianoPair(number, res = null) {
         }
         global[connectionLockKey] = true;
 
-        // Check MongoDB session
+        // Fetch MongoDB session
         const existingSession = await getSessionFromMongoDB(sanitizedNumber);
 
         if (!existingSession) {
@@ -223,11 +221,14 @@ async function levianoPair(number, res = null) {
         }
 
         const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-        const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug' });
+        const logger = pino({ level: 'silent' });
 
-        // Auto fetch the latest WhatsApp Web version to prevent 405 Connection Failure
-        const { version, isLatest } = await fetchLatestBaileysVersion();
-        levianoLog(`Using WA version: ${version.join('.')} (isLatest: ${isLatest})`, 'info');
+        // Fetch dynamic latest version to prevent 405 error
+        let waVersion = [2, 3000, 1015901307];
+        try {
+            const { version } = await fetchLatestBaileysVersion();
+            if (version) waVersion = version;
+        } catch (_) {}
 
         const levianoStore = createarslanStore();
 
@@ -237,17 +238,17 @@ async function levianoPair(number, res = null) {
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
             },
             printQRInTerminal: false,
-            logger: pino({ level: "silent" }),
-            version,
+            logger: logger,
+            version: waVersion,
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 0,
-            keepAliveIntervalMs: 10000,
+            keepAliveIntervalMs: 25000,
             emitOwnEvents: true,
             fireInitQueries: true,
             generateHighQualityLinkPreview: true,
             syncFullHistory: false,
             markOnlineOnConnect: true,
-            browser: Browsers.macOS('Desktop'),
+            browser: Browsers.ubuntu('Chrome'),
             getMessage: async (key) => {
                 const msg = await levianoStore.loadMessage(key.remoteJid, key.id);
                 return msg && msg.message ? msg.message : { conversation: 'LEVIANO-XD' };
@@ -283,10 +284,11 @@ async function levianoPair(number, res = null) {
             return trueFileName;
         };
 
+        // Pairing Code Generation with safe timeout
         if (!conn.authState.creds.registered) {
             levianoLog(`🔐 Starting NEW pairing process for ${sanitizedNumber}`, 'info');
             try {
-                await delay(2000);
+                await delay(4500); // Wait for WebSocket handshake to stabilize
                 const code = await conn.requestPairingCode(sanitizedNumber);
                 levianoLog(`Pairing Code for ${sanitizedNumber}: ${code}`, 'success');
                 if (res && !res.headersSent) {
@@ -308,13 +310,16 @@ async function levianoPair(number, res = null) {
 
         conn.ev.on('creds.update', async () => {
             await saveCreds();
-            const fileContent = await fs.readFile(path.join(sessionPath, 'creds.json'), 'utf8');
-            const creds = JSON.parse(fileContent);
-            const existingSessionCheck = await getSessionFromMongoDB(sanitizedNumber);
-            const isNewSession = !existingSessionCheck;
-            await saveSessionToMongoDB(sanitizedNumber, creds);
-            if (isNewSession) {
-                levianoLog(`🎉 NEW user ${sanitizedNumber} successfully registered!`, 'success');
+            try {
+                const credsPath = path.join(sessionPath, 'creds.json');
+                if (fs.existsSync(credsPath)) {
+                    const fileContent = await fs.readFile(credsPath, 'utf8');
+                    const creds = JSON.parse(fileContent);
+                    await saveSessionToMongoDB(sanitizedNumber, creds);
+                    levianoLog(`Session synced with MongoDB for ${sanitizedNumber}`, 'success');
+                }
+            } catch (e) {
+                levianoLog(`Failed to sync creds to DB: ${e.message}`, 'error');
             }
         });
 
@@ -335,10 +340,6 @@ async function levianoPair(number, res = null) {
                         caption: `${HEADER}\n╭────────────────────◇\n│✦ *LEVIANO-XD— CONNECTED* 🔥\n│✦ Type *${prefix}menu* to see all commands 💫\n│✦ Prefix 『 ${prefix} 』  Mode 〔${mode}〕\n╰────────────────────○\n*© Powered by LEVIANO-XD*`
                     });
                 }
-            }
-            if (connection === 'close') {
-                const reason = lastDisconnect && lastDisconnect.error && lastDisconnect.error.output && lastDisconnect.error.output.statusCode;
-                if (reason === DisconnectReason.loggedOut) levianoLog(`Session logged out.`, 'error');
             }
         });
 
